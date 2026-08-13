@@ -1,0 +1,16 @@
+/* Minimal Solidity syntax highlighting. No external dependencies. */
+pre code.language-solidity .tok-comment { color: #6a737d; font-style: italic; }
+pre code.language-solidity .tok-keyword { color: #d73a49; }
+pre code.language-solidity .tok-type    { color: #005cc5; }
+pre code.language-solidity .tok-string  { color: #22863a; }
+pre code.language-solidity .tok-number  { color: #e36209; }
+pre code.language-solidity .tok-builtin { color: #6f42c1; }
+
+@media (prefers-color-scheme: dark) {
+  pre code.language-solidity .tok-comment { color: #8b949e; }
+  pre code.language-solidity .tok-keyword { color: #ff7b72; }
+  pre code.language-solidity .tok-type    { color: #79c0ff; }
+  pre code.language-solidity .tok-string  { color: #7ee787; }
+  pre code.language-solidity .tok-number  { color: #ffa657; }
+  pre code.language-solidity .tok-builtin { color: #d2a8ff; }
+}

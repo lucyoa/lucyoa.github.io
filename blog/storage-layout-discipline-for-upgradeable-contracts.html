@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Storage Layout Discipline for Upgradeable Contracts — marcinbury</title>
+<link rel="stylesheet" href="assets/solidity-highlight.css">
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    max-width: 720px;
+    margin: 80px auto;
+    padding: 0 20px;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    line-height: 1.6;
+    color: #111;
+  }
+  @media (prefers-color-scheme: dark) {
+    body { color: #eee; background: #111; }
+  }
+  .back { display: inline-block; margin-bottom: 2em; }
+  h1 { font-size: 1.5rem; margin: 0 0 0.2em; line-height: 1.35; }
+  .date { color: #888; font-size: 0.9em; margin-bottom: 2em; display: block; }
+  p { margin: 0 0 1.2em; }
+  em { color: #555; }
+  @media (prefers-color-scheme: dark) { em { color: #aaa; } }
+  h2 {
+    font-size: 1.15rem;
+    margin-top: 2.6em;
+    margin-bottom: 0.7em;
+    padding-bottom: 0.3em;
+    border-bottom: 1px solid rgba(128,128,128,0.25);
+  }
+  h3 {
+    font-size: 1rem;
+    margin-top: 1.8em;
+    margin-bottom: 0.6em;
+  }
+  code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.88em;
+    background: rgba(128,128,128,0.15);
+    padding: 0.15em 0.35em;
+    border-radius: 3px;
+  }
+  pre {
+    background: rgba(128,128,128,0.1);
+    border: 1px solid rgba(128,128,128,0.2);
+    border-radius: 6px;
+    padding: 1em;
+    overflow-x: auto;
+    margin: 0 0 1.3em;
+  }
+  pre code {
+    background: none;
+    padding: 0;
+    font-size: 0.82em;
+    line-height: 1.5;
+  }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 0 0 1.3em;
+    font-size: 0.88em;
+  }
+  th, td {
+    text-align: left;
+    padding: 0.45em 0.7em;
+    border-bottom: 1px solid rgba(128,128,128,0.25);
+    vertical-align: top;
+  }
+  th { color: #888; font-weight: 600; }
+  blockquote {
+    margin: 0 0 1.3em;
+    padding: 0.3em 1.1em;
+    border-left: 3px solid rgba(128,128,128,0.4);
+    color: #666;
+  }
+  @media (prefers-color-scheme: dark) { blockquote { color: #aaa; } }
+  blockquote p { margin: 0 0 0.6em; }
+  blockquote p:last-child { margin-bottom: 0; }
+  ul, ol { margin: 0 0 1.3em; padding-left: 1.4em; }
+  li { margin-bottom: 0.4em; }
+  li > p { margin-bottom: 0.4em; }
+  .div-wrap { overflow-x: auto; }
+</style>
+</head>
+<body>
+
+  <a class="back" href="../index.html">&larr; marcinbury</a>
+
+  <h1>Storage Layout Discipline for Upgradeable Contracts</h1>
+  <span class="date">Aug 2026</span>
+
+  <p><em>In a proxy-upgradeable system, storage layout is the ABI between implementation versions — and the Solidity compiler enforces none of it.</em></p>
+
+  <h2>The compiler has no idea your contract is upgradeable</h2>
+
+  <p>A proxy delegatecalls into an implementation contract, so every <code>SLOAD</code>/<code>SSTORE</code> the implementation emits executes against the proxy's storage, targeting a raw slot number. Solidity assigns those slot numbers deterministically, in source order, at compile time - and it has no concept of "this contract is version 2 of that contract" or "this slot must keep meaning what it meant last week". Two contracts with unrelated names and unrelated business logic can be layout-compatible. Two contracts that are textually almost identical, differing only in the order two base contracts are listed, can be layout-incompatible. The compiler produces both with zero diagnostics either way.</p>
+
+  <p>Everything that keeps upgradeable contracts from silently corrupting their own state - the <code>__gap</code> array, ERC-7201 namespaced storage, "never reorder your <code>is</code> list" - is a convention layered on top of a language that doesn't know upgrades exist. This post works through how the slot-assignment algorithm behaves, where each convention comes from mechanically, and the specific ways each one still breaks in practice.</p>
+
+  <h2>The mechanism: why slot assignment is deterministic, and why that cuts both ways</h2>
+
+  <p>Solidity's storage layout algorithm is simple to state and unforgiving in practice. State variables are assigned to slots starting from slot 0, in declaration order, and for inheriting contracts, layout proceeds <strong>base-to-derived</strong> - the most-base contract's variables occupy the lowest slots, then the next contract up the hierarchy, and so on, with the most-derived contract's own variables landing last. A fixed-size array <code>uint256[N]</code> consumes exactly N consecutive slots - one slot per element, no more, no less.</p>
+
+  <p>This determinism is the entire reason the gap pattern works: if a base contract reserves <code>uint256[50] __gap</code>, every contract that inherits from it is guaranteed - by the same deterministic rule - to start its own variables 50 slots after the base contract's real fields, regardless of how many of those 50 slots are eventually consumed by future upgrades. The mechanics are worth stating precisely:</p>
+
+  <blockquote>
+    <p><code>uint256[50] private __gap;</code>: Allocates 50 consecutive slots. Slots default to 0 (never written). Child contracts inherit slot offsets. Child's first slot = parent's last slot + 1.</p>
+  </blockquote>
+
+  <p>And the refactor rule that keeps a base contract upgrade layout-compatible with everything built on top of it:</p>
+
+  <pre><code>Before: uint256 x; uint256[50] __gap;                    // x at 0, gap at 1..50
+After:  uint256 x; uint256 newVar; uint256[49] __gap;    // x at 0, newVar at 1, gap at 2..50
+// Both layouts have child's first slot at 51 (gap absorbs newVar).</code></pre>
+
+  <p>The same determinism is exactly why the pattern is fragile. It only holds if every future edit to the base contract respects the arithmetic: one new variable in, gap shrinks by exactly one. There is no compiler-level linkage between the size of <code>__gap</code> and the presence of new fields above it - nothing stops you from adding <code>newVar</code> and leaving <code>__gap</code> at <code>[50]</code>, and nothing warns you when you do. Refactoring a base contract like this must shrink the gap by exactly the number of new variables added - otherwise every child contract's layout shifts, silently.</p>
+
+  <h2>PoC: the gap pattern done correctly, and done wrong</h2>
+
+  <p>The following reproduces that refactor directly, extended with an assembly-based slot probe that reads the concrete slot number off a state variable, so the numbers below are directly verifiable rather than asserted.</p>
+
+  <h3>Correct refactor — gap shrinks by exactly one</h3>
+
+  <pre><code class="language-solidity">// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.24;
+
+// ---- V1: base contract as originally shipped ----
+contract V1 {
+    uint256 public x;              // slot 0
+    uint256[50] private __gap;     // slots 1..50
+}
+
+// ---- V2: adds newVar, gap shrinks 50 -&gt; 49 ----
+contract V2 {
+    uint256 public x;              // slot 0
+    uint256 public newVar;         // slot 1  (carved out of the gap)
+    uint256[49] private __gap;     // slots 2..50
+}
+
+// ---- Downstream contracts, unmodified across the upgrade ----
+contract ChildV1 is V1 {
+    uint256 public childVar;
+    function childVarSlot() external pure returns (uint256 slot) {
+        assembly { slot := childVar.slot }
+    }
+}
+
+contract ChildV2 is V2 {
+    uint256 public childVar;
+    function childVarSlot() external pure returns (uint256 slot) {
+        assembly { slot := childVar.slot }
+    }
+}</code></pre>
+
+  <p><code>ChildV1.childVarSlot()</code> and <code>ChildV2.childVarSlot()</code> both return <code>51</code>. <code>x</code> stays at slot 0; <code>newVar</code> is placed into what used to be gap space. The gap absorbs the loss and still ends at slot 50. The <code>childVar</code> lands at 51 either way — confirmed by compiling both versions and calling <code>childVarSlot()</code> on each.</p>
+
+  <h3>Failure mode - gap left at its original size</h3>
+
+  <pre><code class="language-solidity">// ---- V2Bad: newVar added, __gap NOT shrunk ----
+contract V2Bad {
+    uint256 public x;              // slot 0
+    uint256 public newVar;         // slot 1
+    uint256[50] private __gap;     // slots 2..51  (still 50 elements!)
+}
+
+contract ChildV2Bad is V2Bad {
+    uint256 public childVar;
+    function childVarSlot() external pure returns (uint256 slot) {
+        assembly { slot := childVar.slot }
+    }
+}</code></pre>
+
+  <p>Walking the numbers:</p>
+
+  <div class="div-wrap">
+  <table>
+    <thead><tr><th>Contract</th><th><code>x</code></th><th><code>newVar</code></th><th><code>__gap</code> range</th><th><code>childVar</code> slot</th></tr></thead>
+    <tbody>
+      <tr><td><code>V1</code> / <code>ChildV1</code></td><td>0</td><td>—</td><td>1..50</td><td><strong>51</strong></td></tr>
+      <tr><td><code>V2</code> / <code>ChildV2</code> (gap shrunk)</td><td>0</td><td>1</td><td>2..50</td><td><strong>51</strong></td></tr>
+      <tr><td><code>V2Bad</code> / <code>ChildV2Bad</code> (gap not shrunk)</td><td>0</td><td>1</td><td>2..51</td><td><strong>52</strong></td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p>If a proxy currently runs <code>ChildV1</code> and gets upgraded to <code>ChildV2Bad</code>, the deployed proxy storage already has real <code>childVar</code> data in slot 51 from before the upgrade. Post-upgrade, <code>ChildV2Bad</code>'s code reads and writes <code>childVar</code> at slot 52 - previously untouched gap padding, reading as zero. The result isn't a revert. It's silent, structural data loss: the old <code>childVar</code> value becomes permanently orphaned in slot 51, unreachable by the new implementation, while the contract behaves as though <code>childVar</code> reset to zero. Every variable in every contract further down the inheritance chain shifts by the same offset, compounding the corruption per additional field.</p>
+
+  <h2>Inheritance order is load-bearing, and a diff won't show you that</h2>
+
+  <p>Because layout proceeds base-to-derived, the literal order of names in an <code>is A, B</code> list is not cosmetic - it's a second, independent axis of slot assignment, separate from what any individual contract declares. Solidity's C3 linearization makes this precise:</p>
+
+  <blockquote>
+    <p>For <code>contract C is A, B</code>: Linearization (C3): C -&gt; B -&gt; A -&gt; Object. Storage layout (most-base first): A's vars, then B's vars, then C's vars.</p>
+    <p>For <code>contract C2 is B, A</code>: Linearization: C2 -&gt; A -&gt; B -&gt; Object. Storage layout: B's vars first, then A's vars.</p>
+    <p>Same set of variables, different slot assignment. Silent.</p>
+  </blockquote>
+
+  <pre><code class="language-solidity">contract A { uint a; }
+contract B { uint b; }
+contract V1 is A, B { }   // slot 0 = a, slot 1 = b
+contract V2 is B, A { }   // slot 0 = b, slot 1 = a (swapped)</code></pre>
+
+  <p>The example that matters most for real upgrade PRs is swapping two base contracts that look interchangeable in a diff:</p>
+
+  <pre><code>V1: contract V1 is ERC20Base, Ownable  -&gt; slot0 = totalSupply, slot1 = owner
+V2: contract V2 is Ownable, ERC20Base  -&gt; slot0 = owner,       slot1 = totalSupply
+
+Proxy pointing at V2's code reads V1's storage with V2's offsets — totalSupply and owner swap.
+NO COMPILE WARNING. NO RUNTIME WARNING.</code></pre>
+
+  <p>A reviewer scanning <code>contract V2 is Ownable, ERC20Base</code> against <code>contract V1 is ERC20Base, Ownable</code> sees only a reordering of names on one line - no changed types, no new fields, nothing a naive "did the state variables change" check would flag, because no state variable declaration changed at all. The diff is one line. The consequence is that <code>owner</code> reads as whatever <code>totalSupply</code> used to be.</p>
+
+  <p>Multi-base gap patterns behave the same way, with gaps summing in linearization order - as this two-parent example shows:</p>
+
+  <pre><code class="language-solidity">contract A { uint[10] __gap_a; }
+contract B { uint[10] __gap_b; }
+contract C is A, B { uint myVar; }    // myVar at slot 20
+contract C2 is B, A { uint myVar; }   // myVar still at slot 20 but A/B positions swapped</code></pre>
+
+  <p>The aggregate slot count for <code>myVar</code> is unaffected by which parent comes first (20 in both cases, since <code>|A| + |B|</code> is order-independent), but <strong>every field belonging to A or B individually moves</strong> - A's fields occupy 0..9 in <code>C</code> and 10..19 in <code>C2</code>, and vice versa for B. Any off-chain indexer or <code>vm.load</code> assumption keyed to a specific base contract's absolute slot breaks even though <code>myVar</code> happens to land in the same place. The same hazard shows up in a more general form: adding a <em>new</em> parent contract to an existing inheritance list inserts that parent's variables (and gap) at the most-base position, shifting every downstream slot - the same shape as the swap above, just triggered by an addition instead of a reorder.</p>
+
+  <h2>ERC-7201: moving off linear slot arithmetic entirely</h2>
+
+  <p>The gap-and-inheritance-order hazards above share one root cause: linear, declaration-order slot assignment starting from slot 0. <a href="https://eips.ethereum.org/EIPS/eip-7201">ERC-7201 ("Namespaced Storage Layout")</a> sidesteps it by not using linear slots at all - each logical storage region gets a slot computed as a keccak256 hash of a human-readable namespace string, landing at an effectively arbitrary, high-entropy location in the 2²⁵⁶ slot space, independent of declaration order or inheritance position.</p>
+
+  <p>Solidity has direct compiler support for this since version <code>0.8.35</code>: a magic global <code>erc7201("namespace.id")</code> that computes the canonical formula and returns it as a <code>uint256</code>:</p>
+
+  <blockquote>
+    <p>Built-in <code>erc7201("namespace.id")</code> ... returns the canonical ERC-7201 namespaced storage slot. Computes <code>keccak256(keccak256(name) - 1) &amp; ~0xff</code>.</p>
+  </blockquote>
+
+  <p>The builtin is flexible about how the namespace is supplied, with strict typing:</p>
+
+  <div class="div-wrap">
+  <table>
+    <thead><tr><th>Call</th><th>Result</th></tr></thead>
+    <tbody>
+      <tr><td><code>erc7201("ns.foo")</code></td><td>compile-time constant <code>uint256</code></td></tr>
+      <tr><td><code>erc7201(stringVar)</code></td><td>runtime: emits a Yul <code>erc7201</code> builtin call</td></tr>
+      <tr><td><code>erc7201(bytes("foo"))</code></td><td>rejected - Error 6896 (argument must be <code>string</code>, not <code>bytes</code>)</td></tr>
+      <tr><td><code>erc7201("a", "b")</code></td><td>rejected - too many arguments</td></tr>
+      <tr><td><code>erc7201()</code></td><td>rejected - too few arguments</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p>The runtime-argument case is notable on its own: most Solidity magic globals only fold at compile time, but <code>erc7201</code> also supports a non-literal <code>string</code> argument by emitting an actual Yul builtin call, computing the hash on-chain.</p>
+
+  <p>A correct ERC-7201 slot declaration looks like this - a struct holding the namespace's state, a constant slot computed via the builtin, and an internal accessor that lands a storage pointer on that slot:</p>
+
+  <pre><code class="language-solidity">/// @custom:storage-location erc7201:example.main
+struct MainStorage {
+    uint256 value;
+    mapping(address =&gt; uint256) balances;
+}
+
+// slot = keccak256(keccak256("example.main") - 1) &amp; ~0xff
+uint256 constant MAIN_STORAGE_SLOT = erc7201("example.main");
+
+function _getMainStorage() internal pure returns (MainStorage storage $) {
+    assembly {
+        $.slot := MAIN_STORAGE_SLOT
+    }
+}</code></pre>
+
+  <p>Because the namespace string, not source position, determines the slot, adding fields to <code>MainStorage</code>, reordering base contracts, or introducing new parents no longer moves this struct's slot - the entire class of hazards above doesn't apply to data reached through <code>_getMainStorage()</code>.</p>
+
+  <h3>The arithmetic gotcha: erc7201 hashes overflow when combined</h3>
+
+  <p>The <code>erc7201</code> output is deliberately high-entropy - the top 248 bits behave like a uniformly random keccak digest, with only the bottom byte forced to zero by the <code>&amp; ~0xff</code> mask. That entropy is exactly what makes the hash safe as a namespace anchor, and exactly what makes it dangerous to use as an operand in checked arithmetic:</p>
+
+  <blockquote>
+    <p>Roughly 50% of all namespaces produce a hash &gt; 2**255 (top bit set). The canonical solc-test namespace "main:example" happens to produce such a hash, so <code>hash + hash</code> overflows to <code>(hash &lt;&lt; 1) mod 2**256</code>, which is less than hash - checked arithmetic panics 0x11.</p>
+  </blockquote>
+
+  <p>The canonical solc fixture asserts this deterministically for the namespace <code>"main:example"</code>:</p>
+
+  <pre><code class="language-solidity">contract C {
+    function f() public pure returns (uint) {
+        return erc7201("main:example") + erc7201("main:example");
+        // Panics 0x11 — hash &gt; 2**255, doubling overflows
+    }
+}</code></pre>
+
+  <p>The patterns and their outcomes:</p>
+
+  <div class="div-wrap">
+  <table>
+    <thead><tr><th>Pattern</th><th>Outcome</th></tr></thead>
+    <tbody>
+      <tr><td><code>erc7201("X") + erc7201("X")</code></td><td>Panic 0x11 ~50% of the time</td></tr>
+      <tr><td><code>2 * erc7201("X")</code></td><td>Panic 0x11 ~50% of the time</td></tr>
+      <tr><td><code>erc7201("X") + erc7201("Y")</code></td><td>Panic 0x11 ~50% of the time (sum is random)</td></tr>
+      <tr><td><code>erc7201("X") + 1</code></td><td>Safe (only overflows for hash == 2**256-1, probability ~0)</td></tr>
+      <tr><td><code>erc7201("X") | offset</code> (bitwise OR)</td><td>Safe - low byte is 0, OR with a bounded offset just sets bits</td></tr>
+      <tr><td><code>unchecked { erc7201("X") + erc7201("X") }</code></td><td>Wraps silently - safe only if wrap is semantically intended</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p>The pattern that makes this an audit-relevant footgun rather than a curiosity is <strong>derived-slot arithmetic</strong>. A common namespaced-storage idiom computes a per-item slot as <code>erc7201("parent") + uint256(keccak256(itemKey))</code> - adding a keccak-derived offset to the namespace root. Both operands are high-entropy 256-bit values, each with roughly 50% odds of having its top bit set, so the addition has a structurally non-zero panic probability per namespace/key combination. The fix is either <code>unchecked { }</code> - semantically valid here since slot space is the full 256-bit modular ring, so wraparound isn't a correctness bug - or a bitwise OR against a bit-width-bounded offset instead of addition. There's a refactor trap here too: changing the namespace <em>string</em> from one that hashes into the low half of the range to one that hashes into the high half silently flips previously compile-clean, test-passing arithmetic into a runtime panic, with no code-level indication of why.</p>
+
+  <h2>Other layout edge cases worth knowing</h2>
+
+  <p><strong>Mappings and dynamic arrays are exempt from the layout-at storage-end check.</strong> Their data doesn't sit at a fixed offset from the declared base slot. Instead, it lands at a keccak-derived location that is effectively uniform over the entire <code>uint256</code> range, no matter where the base slot itself is. For a mapping keyed by a value type such as <code>uint</code>, <code>address</code>, or <code>bytes32</code>, the value's slot is <code>keccak256(abi.encode(key, slot))</code>. For a dynamic array, the elements start at <code>keccak256(abi.encode(slot))</code>, with element <code>i</code> sitting at that hash plus <code>i</code>.</p>
+
+  <p><code>string</code> and <code>bytes</code> keys are the one case where that formula doesn't apply, and it's an easy mistake to carry it over anyway. The compiler doesn't ABI-encode the key at all. It hashes the raw, unpadded key bytes concatenated directly with the slot, so the real formula is <code>keccak256(key . slot)</code>. That's <code>abi.encodePacked</code> semantics, not <code>abi.encode</code>, and the two produce different hashes once the key is dynamically sized. If you recompute a <code>mapping(string =&gt; V)</code> or <code>mapping(bytes =&gt; V)</code> slot using the value-type formula above, you'll get the wrong answer.</p>
+
+  <p>The storage-end check itself only counts linear storage: plain value types, fixed-size arrays, and structs, whose locations are <code>baseSlot + fixed_offset</code>.</p>
+
+  <div class="div-wrap">
+  <table>
+    <thead><tr><th>Storage shape</th><th>Subject to layout-at end-of-storage check?</th></tr></thead>
+    <tbody>
+      <tr><td><code>uint x;</code> (linear)</td><td>Yes</td></tr>
+      <tr><td><code>uint[10] x;</code> (fixed-size array)</td><td>Yes</td></tr>
+      <tr><td><code>struct S { uint a; uint b; } S x;</code></td><td>Yes</td></tr>
+      <tr><td><code>uint[] x;</code> (dynamic array)</td><td>No - data at <code>keccak256(slot)</code></td></tr>
+      <tr><td><code>mapping(K=&gt;V) m;</code> (value-type key)</td><td>No - data at <code>keccak256(abi.encode(key, slot))</code></td></tr>
+      <tr><td><code>mapping(string/bytes=&gt;V) m;</code></td><td>No - data at <code>keccak256(key . slot)</code> (unpadded key, not <code>abi.encode</code>)</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p>Operationally: an ERC-7201-style namespace containing only mappings and dynamic arrays can safely anchor at any base slot, however large. Mixing linear fields with mappings inside the same high-slot namespace requires accounting for the linear fields separately against the end-of-storage limit.</p>
+
+  <p><strong>Storage-array clearing near the 2²⁵⁶ boundary was silently broken, fixed in 0.8.32</strong> (tracked upstream as <a href="https://blog.soliditylang.org/2025/12/18/lost-storage-array-write-on-slot-overflow-bug/">SOL-2025-1</a>). Any storage array whose slots straddled the wraparound point (slot near <code>2²⁵⁶ - 1</code> wrapping back to 0) had its clearing loop - used by <code>delete</code>, <code>.pop()</code>, <code>.push()</code>'s zero-init, size-mismatched assignment, and legacy-backend array copy - terminate immediately without executing, because the naive bound check <code>i &lt; end</code> failed once <code>end</code> had wrapped smaller than <code>start</code>. Severity is low since triggering it requires an intentionally engineered layout - a large nested fixed-array inside a mapping value, or an explicit <code>layout at</code> near the top of the address space - but it's a concrete audit pattern worth checking for any contract compiled below 0.8.32 that uses <code>layout at</code> near <code>2**256</code> or large mapping-of-fixed-array structures. It's relevant here because ERC-7201 namespacing and custom <code>layout at</code> bases both intentionally place storage away from slot 0 - the exact precondition this bug needed.</p>
+
+  <h2>Audit checklist for an upgrade PR</h2>
+
+  <p>Everything above converges on one conclusion: reviewing an upgrade PR by reading the source diff is not sufficient, because every hazard here is invisible in a diff that shows what changed syntactically, not what moved semantically in slot space.</p>
+
+  <ol>
+    <li><strong>Diff the full computed storage layout, not the source.</strong> Compile both the pre- and post-upgrade implementation and compare <code>solc --storage-layout</code> output slot-by-slot, not contract-by-contract. A one-line <code>is</code> reordering or a field addition without a matching gap reduction produces zero source-level signal but a full slot-level shift.</li>
+    <li><strong>Verify gap arithmetic exactly.</strong> For every base contract with a <code>__gap</code>, confirm: (new fields added this upgrade) + (new <code>__gap</code> size) == (old <code>__gap</code> size). Any mismatch shifts every slot in every contract that inherits from that base, compounding downstream.</li>
+    <li><strong>Verify the inheritance list order is byte-for-byte unchanged</strong>, or, if it legitimately changed, recompute the full layout rather than assuming the change is cosmetic - including additions of new parent contracts, which insert at the most-base position and shift everything above them.</li>
+    <li><strong>For ERC-7201 namespaces, recompute the constant independently</strong> rather than trusting a hardcoded hex literal, and confirm it matches <code>keccak256(keccak256(name) - 1) &amp; ~0xff</code> for the intended namespace string. Check for collisions across namespaces and for exact-match drift against any prior-version string - a single-character typo silently mints an unrelated slot with no compiler error.</li>
+    <li><strong>Audit any arithmetic performed on an <code>erc7201()</code> result.</strong> Flag checked <code>+</code>/<code>*</code> combining two hash-derived values, or a hash-derived value with another high-entropy operand; require either <code>unchecked { }</code> with a comment justifying modular-wraparound safety, or a bitwise-OR-with-bounded-offset instead.</li>
+    <li><strong>For contracts using <code>layout at</code> near the top of the address space</strong>, confirm solc &gt;= 0.8.32 if linear (non-keccak-derived) data sits near the boundary, per <a href="https://blog.soliditylang.org/2025/12/18/lost-storage-array-write-on-slot-overflow-bug/">SOL-2025-1</a>.</li>
+    <li><strong>Treat this as a recurring regression check, not a one-time review.</strong> Re-run the layout diff on every subsequent upgrade PR - the gap-shrink and inheritance-order invariants must hold across the entire version history, and one silently broken link corrupts every version built on top of it.</li>
+  </ol>
+
+  <h2>Closing</h2>
+
+  <p>None of the mechanisms described here are bugs in the compiler-team sense - slot assignment by declaration order, base-to-derived layout, and keccak-derived mapping/array slots are all working exactly as documented. The hazard is that Solidity treats storage layout as a pure function of source text with no notion of versioning, while proxy-upgradeable systems require layout to be a <em>stable contract</em> across versions of that source text. <code>__gap</code>, ERC-7201 namespacing, and "don't reorder your <code>is</code> list" are the community's answer to that mismatch - none of them are enforced by the type system, none of them produce a compiler diagnostic when violated, and all of them fail exactly the way an ordinary refactor looks: a one-line diff with no red flags, that happens to relocate a state variable.</p>
+
+<script src="assets/solidity-highlight.js" defer></script>
+</body>
+</html>
