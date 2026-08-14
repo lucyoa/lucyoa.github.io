@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Storage Layout Discipline for Upgradeable Contracts — marcinbury</title>
+<title>Storage Layout Discipline for Upgradeable Contracts - marcinbury</title>
 <link rel="stylesheet" href="assets/solidity-highlight.css">
 <style>
   :root { color-scheme: light dark; }
@@ -92,7 +92,7 @@
   <h1>Storage Layout Discipline for Upgradeable Contracts</h1>
   <span class="date">Aug 2026</span>
 
-  <p><em>In a proxy-upgradeable system, storage layout is the ABI between implementation versions — and the Solidity compiler enforces none of it.</em></p>
+  <p><em>In a proxy-upgradeable system, storage layout is the ABI between implementation versions - and the Solidity compiler enforces none of it.</em></p>
 
   <h2>The compiler has no idea your contract is upgradeable</h2>
 
@@ -122,7 +122,7 @@ After:  uint256 x; uint256 newVar; uint256[49] __gap;    // x at 0, newVar at 1,
 
   <p>The following reproduces that refactor directly, extended with an assembly-based slot probe that reads the concrete slot number off a state variable, so the numbers below are directly verifiable rather than asserted.</p>
 
-  <h3>Correct refactor — gap shrinks by exactly one</h3>
+  <h3>Correct refactor - gap shrinks by exactly one</h3>
 
   <pre><code class="language-solidity">// SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
@@ -155,7 +155,7 @@ contract ChildV2 is V2 {
     }
 }</code></pre>
 
-  <p><code>ChildV1.childVarSlot()</code> and <code>ChildV2.childVarSlot()</code> both return <code>51</code>. <code>x</code> stays at slot 0; <code>newVar</code> is placed into what used to be gap space. The gap absorbs the loss and still ends at slot 50. The <code>childVar</code> lands at 51 either way — confirmed by compiling both versions and calling <code>childVarSlot()</code> on each.</p>
+  <p><code>ChildV1.childVarSlot()</code> and <code>ChildV2.childVarSlot()</code> both return <code>51</code>. <code>x</code> stays at slot 0; <code>newVar</code> is placed into what used to be gap space. The gap absorbs the loss and still ends at slot 50. The <code>childVar</code> lands at 51 either way - confirmed by compiling both versions and calling <code>childVarSlot()</code> on each.</p>
 
   <h3>Failure mode - gap left at its original size</h3>
 
@@ -179,7 +179,7 @@ contract ChildV2Bad is V2Bad {
   <table>
     <thead><tr><th>Contract</th><th><code>x</code></th><th><code>newVar</code></th><th><code>__gap</code> range</th><th><code>childVar</code> slot</th></tr></thead>
     <tbody>
-      <tr><td><code>V1</code> / <code>ChildV1</code></td><td>0</td><td>—</td><td>1..50</td><td><strong>51</strong></td></tr>
+      <tr><td><code>V1</code> / <code>ChildV1</code></td><td>0</td><td>-</td><td>1..50</td><td><strong>51</strong></td></tr>
       <tr><td><code>V2</code> / <code>ChildV2</code> (gap shrunk)</td><td>0</td><td>1</td><td>2..50</td><td><strong>51</strong></td></tr>
       <tr><td><code>V2Bad</code> / <code>ChildV2Bad</code> (gap not shrunk)</td><td>0</td><td>1</td><td>2..51</td><td><strong>52</strong></td></tr>
     </tbody>
@@ -208,7 +208,7 @@ contract V2 is B, A { }   // slot 0 = b, slot 1 = a (swapped)</code></pre>
   <pre><code>V1: contract V1 is ERC20Base, Ownable  -&gt; slot0 = totalSupply, slot1 = owner
 V2: contract V2 is Ownable, ERC20Base  -&gt; slot0 = owner,       slot1 = totalSupply
 
-Proxy pointing at V2's code reads V1's storage with V2's offsets — totalSupply and owner swap.
+Proxy pointing at V2's code reads V1's storage with V2's offsets - totalSupply and owner swap.
 NO COMPILE WARNING. NO RUNTIME WARNING.</code></pre>
 
   <p>A reviewer scanning <code>contract V2 is Ownable, ERC20Base</code> against <code>contract V1 is ERC20Base, Ownable</code> sees only a reordering of names on one line - no changed types, no new fields, nothing a naive "did the state variables change" check would flag, because no state variable declaration changed at all. The diff is one line. The consequence is that <code>owner</code> reads as whatever <code>totalSupply</code> used to be.</p>
@@ -281,7 +281,7 @@ function _getMainStorage() internal pure returns (MainStorage storage $) {
   <pre><code class="language-solidity">contract C {
     function f() public pure returns (uint) {
         return erc7201("main:example") + erc7201("main:example");
-        // Panics 0x11 — hash &gt; 2**255, doubling overflows
+        // Panics 0x11 - hash &gt; 2**255, doubling overflows
     }
 }</code></pre>
 
